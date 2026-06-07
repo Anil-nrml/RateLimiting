@@ -1,0 +1,102 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>RateLimiting.Api</name>
+    </assembly>
+    <members>
+        <member name="T:RateLimiting.Api.Configuration.InMemoryCustomerPolicyStore">
+             <summary>
+             In-memory implementation of <see cref="T:RateLimiting.Core.Interfaces.ICustomerPolicyStore"/>.
+            
+             Defines rate-limit policies per customer:
+               • Customer A (Enterprise)  — 1 000 req/s + 2 000 000 req/hour
+               • Customer B (Standard)    — 100 req/s   +   200 000 req/hour
+               • Default  (Anonymous/IP)  —  60 req/min
+            
+             Multiple policies per customer use AND semantics:
+               ALL must pass — the first failure short-circuits with 429.
+            
+             Production note:
+               Replace this class (or extend it) to load policies from a database,
+               Redis, Azure App Configuration, or any config service.
+               The rest of the pipeline never touches this class directly — it depends
+               only on <see cref="T:RateLimiting.Core.Interfaces.ICustomerPolicyStore"/>.
+             </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Configuration.InMemoryCustomerPolicyStore.GetConfig(System.String)">
+            <inheritdoc />
+        </member>
+        <member name="M:RateLimiting.Api.Configuration.InMemoryCustomerPolicyStore.TryGetConfig(System.String,RateLimiting.Core.Models.CustomerRateLimitConfig@)">
+            <inheritdoc />
+        </member>
+        <member name="T:RateLimiting.Api.Controllers.DemoController">
+             <summary>
+             Demo endpoints for testing rate limiting behaviour.
+            
+             Test with curl:
+               # As Customer A (Enterprise — 1000/sec):
+               curl -H "X-Customer-ID: customer-a" https://localhost:5001/api/demo/ping
+            
+               # As Customer B (Standard — 100/sec):
+               curl -H "X-Customer-ID: customer-b" https://localhost:5001/api/demo/ping
+            
+               # Burst test (sends 200 requests rapidly):
+               for i in {1..200}; do curl -s -o /dev/null -w "%{http_code}\n" \
+                 -H "X-Customer-ID: customer-b" https://localhost:5001/api/demo/ping; done
+             </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Controllers.DemoController.Ping">
+            <summary>
+            Simple health-check endpoint.
+            The rate-limiting middleware evaluates before this action runs.
+            On success: 200. If limited: 429 (never reaches this action).
+            </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Controllers.DemoController.GetPolicy(System.String)">
+            <summary>
+            Returns the current rate-limit policy for a given customer.
+            Useful for dashboards and debugging.
+            </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Controllers.DemoController.Slow(System.Threading.CancellationToken)">
+            <summary>
+            Simulates a slow endpoint (100ms) to show that rate limiting
+            acts before the endpoint executes.
+            </summary>
+        </member>
+        <member name="T:RateLimiting.Api.Extensions.RateLimitingExtensions">
+            <summary>
+            Extension methods for registering rate-limiting services and middleware.
+            Keeps <c>Program.cs</c> clean — all wiring in one place.
+            </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Extensions.RateLimitingExtensions.AddRateLimiting(Microsoft.Extensions.DependencyInjection.IServiceCollection)">
+            <summary>
+            Registers all rate-limiting services into the DI container.
+            Call this in <c>Program.cs</c> before <c>builder.Build()</c>.
+            </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Extensions.RateLimitingExtensions.UseRateLimiting(Microsoft.AspNetCore.Builder.IApplicationBuilder)">
+            <summary>
+            Adds the <see cref="T:RateLimiting.Api.Middleware.RateLimitMiddleware"/> to the request pipeline.
+            Place this call BEFORE <c>UseAuthentication</c> and <c>UseAuthorization</c>
+            so that 429 responses are returned cheaply without running auth logic.
+            </summary>
+        </member>
+        <member name="T:RateLimiting.Api.Middleware.RateLimitMiddleware">
+             <summary>
+             Rate-Limiting Middleware
+             ─────────────────────────
+             Pipeline position: registered BEFORE authentication so 429 responses are
+             returned cheaply, without executing token validation.
+            
+             Per-request flow:
+               1. Resolve the caller's customer ID (header → JWT → API key → IP).
+               2. Load the customer's policy set from <see cref="T:RateLimiting.Core.Interfaces.ICustomerPolicyStore"/>.
+               3. Evaluate each policy in order — ALL must pass (AND semantics).
+               4. Write RFC-compliant rate-limit headers on every response.
+               5. Return HTTP 429 with a JSON body if any policy fails.
+             </summary>
+        </member>
+    </members>
+</doc>

@@ -1,0 +1,188 @@
+<!--
+  ════════════════════════════════════════════════════════════════════════════════
+  Azure API Management — Rate Limit Inbound Policy
+  ════════════════════════════════════════════════════════════════════════════════
+
+  Apply at:   API level  (APIs > Your API > All Operations > Inbound policy)
+              or Product level for tier-based limits (simpler — see bottom)
+
+  Strategy:   Two-layer defence
+    Layer 1 — APIM:     Fast edge enforcement before traffic hits the backend.
+                        Protects the API even if the .NET service is overwhelmed.
+    Layer 2 — .NET API: Fine-grained, algorithm-aware per-customer enforcement.
+
+  Customer tiers defined here:
+    customer-a  (Enterprise)  1 000 req/s + 2 000 000 req/h
+    customer-b  (Standard)      100 req/s +   200 000 req/h
+    default     (Anonymous)      60 req/min
+
+  How customer ID flows to the .NET middleware:
+    APIM resolves Subscription → Name → sets X-Customer-ID header.
+    Middleware reads X-Customer-ID and maps to the correct policy.
+  ════════════════════════════════════════════════════════════════════════════════
+-->
+
+<policies>
+  <inbound>
+    <base />
+
+    <!-- Step 1 — Resolve customer identity from APIM subscription -->
+    <set-variable name="customerId"
+                  value="@(context.Subscription?.Name?.ToLower() ?? "anonymous")" />
+
+    <!-- Step 2 — Inject resolved identity into backend request -->
+    <set-header name="X-Customer-ID" exists-action="override">
+      <value>@((string)context.Variables["customerId"])</value>
+    </set-header>
+
+    <!-- Step 3 — Per-customer rate limits (APIM first layer) -->
+    <choose>
+
+      <!-- ── Customer A: Enterprise — 1 000 req/s + 2 M/hour ───────────────── -->
+      <when condition="@(context.Subscription?.Name?.ToLower() == "customer-a")">
+
+        <!-- Per-second limit -->
+        <rate-limit-by-key
+          calls="1000"
+          renewal-period="1"
+          counter-key="@(context.Subscription.Id + ":per-second")"
+          remaining-calls-header-name="X-RateLimit-Remaining"
+          retry-after-header-name="Retry-After"
+          remaining-calls-variable-name="remainingCallsA" />
+
+        <!-- Per-hour guard -->
+        <rate-limit-by-key
+          calls="2000000"
+          renewal-period="3600"
+          counter-key="@(context.Subscription.Id + ":per-hour")" />
+
+      </when>
+
+      <!-- ── Customer B: Standard — 100 req/s + 200 K/hour ─────────────────── -->
+      <when condition="@(context.Subscription?.Name?.ToLower() == "customer-b")">
+
+        <rate-limit-by-key
+          calls="100"
+          renewal-period="1"
+          counter-key="@(context.Subscription.Id + ":per-second")"
+          remaining-calls-header-name="X-RateLimit-Remaining"
+          retry-after-header-name="Retry-After" />
+
+        <rate-limit-by-key
+          calls="200000"
+          renewal-period="3600"
+          counter-key="@(context.Subscription.Id + ":per-hour")" />
+
+      </when>
+
+      <!-- ── Default: 60 req/min, keyed by IP ──────────────────────────────── -->
+      <otherwise>
+        <rate-limit-by-key
+          calls="60"
+          renewal-period="60"
+          counter-key="@(context.Request.IpAddress)"
+          remaining-calls-header-name="X-RateLimit-Remaining"
+          retry-after-header-name="Retry-After" />
+      </otherwise>
+
+    </choose>
+
+    <!-- Step 4 — Informational headers -->
+    <set-header name="X-RateLimit-Policy" exists-action="override">
+      <value>@((string)context.Variables["customerId"])</value>
+    </set-header>
+
+  </inbound>
+
+  <backend>
+    <base />
+  </backend>
+
+  <outbound>
+    <base />
+    <set-header name="X-APIM-Processed" exists-action="override">
+      <value>true</value>
+    </set-header>
+  </outbound>
+
+  <!-- Step 5 — Custom 429 body -->
+  <on-error>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 429)">
+        <set-header name="Content-Type" exists-action="override">
+          <value>application/json</value>
+        </set-header>
+        <set-body>@{
+          return Newtonsoft.Json.JsonConvert.SerializeObject(new {
+            error            = "rate_limit_exceeded",
+            message          = "Too many requests. Check the Retry-After header.",
+            customerId       = (string)context.Variables["customerId"],
+            documentationUrl = "https://your-api.com/docs/rate-limits"
+          });
+        }</set-body>
+      </when>
+    </choose>
+  </on-error>
+
+</policies>
+
+
+<!--
+  ════════════════════════════════════════════════════════════════════════════════
+  ALTERNATIVE: Product-Level Policy (simpler for tier-based limits)
+  ════════════════════════════════════════════════════════════════════════════════
+  Instead of choose/when, assign customers to APIM Products:
+    • Product "Enterprise" → apply this policy → 1000/sec
+    • Product "Standard"   → apply this policy → 100/sec
+
+  Enterprise Product policy:
+    <policies>
+      <inbound>
+        <base />
+        <rate-limit calls="1000" renewal-period="1" />
+        <quota     calls="2000000" renewal-period="3600" />
+      </inbound>
+      ...
+    </policies>
+
+  Standard Product policy:
+    <policies>
+      <inbound>
+        <base />
+        <rate-limit calls="100" renewal-period="1" />
+        <quota     calls="200000" renewal-period="3600" />
+      </inbound>
+      ...
+    </policies>
+  ════════════════════════════════════════════════════════════════════════════════
+
+
+  ════════════════════════════════════════════════════════════════════════════════
+  TERRAFORM — Deploy APIM policy as Infrastructure as Code
+  ════════════════════════════════════════════════════════════════════════════════
+
+  resource "azurerm_api_management_api_policy" "rate_limit" {
+    api_name            = azurerm_api_management_api.main.name
+    api_management_name = azurerm_api_management.main.name
+    resource_group_name = var.resource_group_name
+    xml_content         = file("${path.module}/apim-policy.xml")
+  }
+
+  resource "azurerm_api_management_subscription" "customer_a" {
+    api_management_name = azurerm_api_management.main.name
+    resource_group_name = var.resource_group_name
+    product_id          = azurerm_api_management_product.enterprise.id
+    display_name        = "customer-a"
+    state               = "active"
+  }
+
+  resource "azurerm_api_management_subscription" "customer_b" {
+    api_management_name = azurerm_api_management.main.name
+    resource_group_name = var.resource_group_name
+    product_id          = azurerm_api_management_product.standard.id
+    display_name        = "customer-b"
+    state               = "active"
+  }
+  ════════════════════════════════════════════════════════════════════════════════
+-->
