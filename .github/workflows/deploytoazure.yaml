@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - master
+      - anil-dev
   workflow_dispatch:
 
 jobs:
@@ -52,4 +53,4 @@ jobs:
           app-name: 'wabpppcicd'
           slot-name: 'Production'
           package: .
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE}}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
