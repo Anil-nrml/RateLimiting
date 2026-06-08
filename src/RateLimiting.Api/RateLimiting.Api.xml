@@ -29,6 +29,26 @@
         <member name="M:RateLimiting.Api.Configuration.InMemoryCustomerPolicyStore.TryGetConfig(System.String,RateLimiting.Core.Models.CustomerRateLimitConfig@)">
             <inheritdoc />
         </member>
+        <member name="T:RateLimiting.Api.Configuration.OperationPolicyStore">
+             <summary>
+             Maps (HTTP method + path prefix) → a fine-grained rate-limit policy.
+            
+             This is the third and most granular layer:
+               Layer 1 — Customer   (who is calling)
+               Layer 2 — Service    (which microservice)
+               Layer 3 — Operation  (which specific endpoint + verb)  ← this class
+            
+             Example: POST /payments/charge has a much tighter limit (10/min) than
+                      GET  /payments/balance (60/min) even though both hit the Payment service.
+             </summary>
+        </member>
+        <member name="M:RateLimiting.Api.Configuration.OperationPolicyStore.GetPolicy(System.String,System.String)">
+            <summary>
+            Returns the operation-level policy for the given HTTP method and path,
+            or null if no specific operation policy is configured (service-level applies).
+            Uses longest-prefix matching.
+            </summary>
+        </member>
         <member name="T:RateLimiting.Api.Controllers.DemoController">
              <summary>
              Demo endpoints for testing rate limiting behaviour.
