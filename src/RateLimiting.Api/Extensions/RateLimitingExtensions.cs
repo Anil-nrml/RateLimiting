@@ -31,6 +31,7 @@ public static class RateLimitingExtensions
         // Swap InMemoryCustomerPolicyStore for a DB/Redis-backed implementation
         // in production without changing anything else in the pipeline.
         services.AddSingleton<ICustomerPolicyStore, InMemoryCustomerPolicyStore>();
+        services.AddSingleton<OperationPolicyStore>();
 
         return services;
     }
