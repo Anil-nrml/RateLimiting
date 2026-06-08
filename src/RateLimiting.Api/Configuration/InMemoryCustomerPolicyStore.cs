@@ -101,5 +101,39 @@ public sealed class InMemoryCustomerPolicyStore : ICustomerPolicyStore
                         Window:    TimeSpan.FromMinutes(1),
                         Algorithm: RateLimitAlgorithm.FixedWindowCounter),
                 ]),
+            // ════════════════════════════════════════════════════════════════
+            // SERVICE-LEVEL POLICIES
+            // Applied after customer check — each service has its own limits
+            // Keyed by the X-Service-ID header injected by Ocelot routing
+            // ════════════════════════════════════════════════════════════════
+
+            // ── Employee Service ─────────────────────────────────────────────
+            // Burst-tolerant: cart additions, product views spike naturally
+            ["employee-service"] = new CustomerRateLimitConfig("employee-service",
+            [
+                new RateLimitPolicy("per-minute", 500, TimeSpan.FromMinutes(1),
+                    BurstLimit: 750, Algorithm: RateLimitAlgorithm.TokenBucket),
+                new RateLimitPolicy("per-hour",   20_000, TimeSpan.FromHours(1),
+                    Algorithm: RateLimitAlgorithm.SlidingWindowCounter),
+            ]),
+
+            // ── Product Service ───────────────────────────────────────────
+            // Smooth output: product processors (Stripe, Razorpay) impose
+            // their own rate limits — a burst from us causes cascading 429s
+            ["product-service"] = new CustomerRateLimitConfig("product-service",
+            [
+                new RateLimitPolicy("per-minute", 50, TimeSpan.FromMinutes(1),
+                    Algorithm: RateLimitAlgorithm.LeakyBucket),
+                new RateLimitPolicy("per-day",    50_000, TimeSpan.FromHours(24),
+                    Algorithm: RateLimitAlgorithm.SlidingWindowCounter),
+            ]),
+
+            //// ── Shipping Service ──────────────────────────────────────────
+            //// Balanced: tracking lookups are frequent; label creation is rarer
+            //["shipping-service"] = new CustomerRateLimitConfig("shipping-service",
+            //[
+            //    new RateLimitPolicy("per-minute", 200, TimeSpan.FromMinutes(1),
+            //        BurstLimit: 250, Algorithm: RateLimitAlgorithm.SlidingWindowCounter),
+            //]),
         };
 }

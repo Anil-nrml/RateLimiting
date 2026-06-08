@@ -1,3 +1,5 @@
+using Ocelot.DependencyInjection;
+using Ocelot.Middleware;
 using RateLimiting.Api.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,6 +22,9 @@ builder.Services.AddSwaggerGen(c =>
         AppContext.BaseDirectory, "RateLimiting.Api.xml"), includeControllerXmlComments: true);
 });
 
+builder.Configuration.AddJsonFile("ocelot.json", optional: false, reloadOnChange: true);
+
+builder.Services.AddOcelot(builder.Configuration);
 // ── Rate limiting (all five algorithms + customer policies) ──────────────────
 builder.Services.AddRateLimiting();
 
@@ -49,6 +54,7 @@ app.UseHttpsRedirection();
 
 // Rate limiting MUST come before authentication — cheap 429s before any auth work.
 app.UseRateLimiting();
+await app.UseOcelot();
 
 app.UseAuthentication();
 app.UseAuthorization();

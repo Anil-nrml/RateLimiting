@@ -1,0 +1,85 @@
+{
+  "Routes": [
+
+    // ── ORDER SERVICE ──────────────────────────────────────────────────────────
+    // All /orders/** requests proxy to the Order microservice.
+    // Ocelot injects X-Service-ID: order-service so the middleware
+    // applies order-service policies (500/min TokenBucket).
+    {
+      "UpstreamPathTemplate": "/products/{everything}",
+      "UpstreamHttpMethod": [ "GET", "POST", "PUT", "DELETE", "PATCH" ],
+      "DownstreamPathTemplate": "/{everything}",
+      "DownstreamScheme": "https",
+      "DownstreamHostAndPorts": [
+        {
+          "Host": "productpervice-api-hebncwcxbydaaxb0.eastus-01.azurewebsites.net",
+          "Port": 443
+        }
+      ],
+      "AddHeadersToRequest": {
+        "X-Service-ID": "product-service"
+      },
+      "LoadBalancerOptions": {
+        "Type": "RoundRobin"
+      }
+    },
+
+    // ── PAYMENT SERVICE ────────────────────────────────────────────────────────
+    // /payments/** → Payment microservice
+    // X-Service-ID: payment-service → 50/min LeakyBucket
+    {
+      "UpstreamPathTemplate": "/employees/{everything}",
+      "UpstreamHttpMethod": [ "GET", "POST" ],
+      "DownstreamPathTemplate": "/{everything}",
+      "DownstreamScheme": "https",
+      "DownstreamHostAndPorts": [
+        {
+          "Host": "employeeapiservice-api-c9f9dzgshvb6cxgu.eastus-01.azurewebsites.net",
+          "Port": 443
+        }
+      ],
+      "AddHeadersToRequest": {
+        "X-Service-ID": "employee-service"
+      },
+      "QoSOptions": {
+        "ExceptionsAllowedBeforeBreaking": 3,
+        "DurationOfBreak": 10000,
+        "TimeoutValue": 5000
+      }
+    }
+
+    //// ── SHIPPING SERVICE ───────────────────────────────────────────────────────
+    //// /shipping/** → Shipping microservice
+    //// X-Service-ID: shipping-service → 200/min SlidingWindowCounter
+    //{
+    //  "UpstreamPathTemplate": "/shipping/{everything}",
+    //  "UpstreamHttpMethod": [ "GET", "POST" ],
+    //  "DownstreamPathTemplate": "/{everything}",
+    //  "DownstreamScheme": "https",
+    //  "DownstreamHostAndPorts": [
+    //    {
+    //      "Host": "shipping-api.azurewebsites.net",
+    //      "Port": 443
+    //    }
+    //  ],
+    //  "AddHeadersToRequest": {
+    //    "X-Service-ID": "shipping-service"
+    //  },
+    //  "LoadBalancerOptions": {
+    //    "Type": "RoundRobin"
+    //  }
+    //}
+
+  ],
+
+  "GlobalConfiguration": {
+    "BaseUrl": "ratelimit-api-hddecjd4ezbfbng2.eastus-01.azurewebsites.net",
+
+    "HttpHandlerOptions": {
+      "AllowAutoRedirect": false,
+      "UseCookieContainer": false,
+      "UseTracing": false,
+      "MaxConnectionsPerServer": 100
+    }
+  }
+}

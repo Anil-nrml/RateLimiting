@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using RateLimiting.Api.Configuration;
 using RateLimiting.Core.Interfaces;
 using RateLimiting.Core.Models;
 
@@ -22,134 +23,175 @@ public sealed class RateLimitMiddleware
 {
     private readonly RequestDelegate      _next;
     private readonly IRateLimiterFactory  _factory;
-    private readonly ICustomerPolicyStore _policyStore;
+    private readonly ICustomerPolicyStore _customerStore;
+    private readonly OperationPolicyStore _operationStore;
     private readonly ILogger<RateLimitMiddleware> _logger;
+
+    private static readonly JsonSerializerOptions _json = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     public RateLimitMiddleware(
         RequestDelegate           next,
         IRateLimiterFactory       factory,
-        ICustomerPolicyStore      policyStore,
+        ICustomerPolicyStore customerStore,
+        OperationPolicyStore operationStore,
         ILogger<RateLimitMiddleware> logger)
     {
         _next        = next;
         _factory     = factory;
-        _policyStore = policyStore;
+        _customerStore = customerStore;
+        _operationStore = operationStore;
         _logger      = logger;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
         var customerId = ResolveCustomerId(context);
-        var config     = _policyStore.GetConfig(customerId);
+        var serviceId = ResolveServiceId(context);
+        var path = context.Request.Path.Value ?? string.Empty;
+        var method = context.Request.Method;
 
-        RateLimitResult? failedResult = null;
-        RateLimitResult? lastResult   = null;
+        // ── Layer 1: Customer-level check ────────────────────────────────
+        var customerConfig = _customerStore.GetConfig(customerId);
+        var customerFail = await EvaluatePoliciesAsync(customerId, customerConfig.Policies);
 
-        foreach (var policy in config.Policies)
+        if (customerFail is not null)
         {
-            // Compound key keeps each policy's counter independent.
-            var limiterKey = $"{customerId}:{policy.Name}";
-            var limiter    = _factory.GetLimiter(policy.Algorithm);
-            var result     = await limiter.IsAllowedAsync(limiterKey, policy);
+            SetHeaders(context, customerFail, customerConfig);
+            _logger.LogWarning(
+                "Customer rate limit exceeded — customer={CustomerId} path={Path}",
+                customerId, path);
+            await WriteResponseAsync(context, customerFail, customerId, "customer");
+            return;
+        }
 
-            lastResult = result;
+        SetHeaders(context, customerFail, customerConfig);
 
-            if (!result.IsAllowed)
+        // ── Layer 2: Service-level check ─────────────────────────────────
+        if (!string.IsNullOrEmpty(serviceId))
+        {
+            var serviceConfig = _customerStore.GetConfig(serviceId);
+            var serviceFail = await EvaluatePoliciesAsync(serviceId, serviceConfig.Policies);
+
+            if (serviceFail is not null)
             {
-                failedResult = result;
                 _logger.LogWarning(
-                    "Rate limit exceeded — customer={CustomerId} policy={PolicyName} " +
-                    "limit={Limit}/{Window} algorithm={Algorithm}",
-                    customerId, policy.Name, policy.Limit, policy.Window, policy.Algorithm);
-                break; // short-circuit on first failure
+                    "Service rate limit exceeded — service={ServiceId} customer={CustomerId} path={Path}",
+                    serviceId, customerId, path);
+                await WriteResponseAsync(context, serviceFail, customerId, serviceId);
+                return;
             }
         }
 
-        SetRateLimitHeaders(context, lastResult, config);
-
-        if (failedResult is not null)
+        // ── Layer 3: Operation-level check ───────────────────────────────
+        var opPolicy = _operationStore.GetPolicy(method, path);
+        if (opPolicy is not null)
         {
-            await WriteRateLimitResponse(context, failedResult, customerId);
-            return;
+            var opKey = $"{customerId}:{method}:{path}";
+            var opLimiter = _factory.GetLimiter(opPolicy.Algorithm);
+            var opResult = await opLimiter.IsAllowedAsync(opKey, opPolicy);
+
+            if (!opResult.IsAllowed)
+            {
+                _logger.LogWarning(
+                    "Operation rate limit exceeded — operation={Method}:{Path} customer={CustomerId}",
+                    method, path, customerId);
+                await WriteResponseAsync(context, opResult, customerId, $"{method}:{path}");
+                return;
+            }
         }
 
         await _next(context);
     }
 
-    // ── Customer ID resolution ────────────────────────────────────────────────
-    // Precedence (highest → lowest):
-    //   1. X-Customer-ID header  (injected by APIM after subscription resolution)
-    //   2. JWT sub / client_id claim
-    //   3. X-Api-Key header      (look up via your own key store in production)
-    //   4. Remote IP address     (last resort)
+    // ── Policy evaluation helper ─────────────────────────────────────────────
 
-    private static string ResolveCustomerId(HttpContext context)
+    private async Task<RateLimitResult?> EvaluatePoliciesAsync(
+        string id, IEnumerable<RateLimitPolicy> policies)
     {
-        if (context.Request.Headers.TryGetValue("X-Customer-ID", out var fromHeader)
+        foreach (var policy in policies)
+        {
+            var limiter = _factory.GetLimiter(policy.Algorithm);
+            var result = await limiter.IsAllowedAsync($"{id}:{policy.Name}", policy);
+            if (!result.IsAllowed)
+                return result;
+        }
+        return null;
+    }
+
+    // ── Customer ID resolution ───────────────────────────────────────────────
+
+    private static string ResolveCustomerId(HttpContext ctx)
+    {
+        if (ctx.Request.Headers.TryGetValue("X-Customer-ID", out var fromHeader)
             && !string.IsNullOrWhiteSpace(fromHeader))
             return fromHeader.ToString().ToLowerInvariant();
 
-        var jwtClaim = context.User?.FindFirst("sub")?.Value
-                    ?? context.User?.FindFirst("client_id")?.Value;
+        var jwtClaim = ctx.User?.FindFirst("sub")?.Value
+                    ?? ctx.User?.FindFirst("client_id")?.Value;
         if (!string.IsNullOrWhiteSpace(jwtClaim))
             return jwtClaim.ToLowerInvariant();
 
-        if (context.Request.Headers.TryGetValue("X-Api-Key", out var apiKey)
+        if (ctx.Request.Headers.TryGetValue("X-Api-Key", out var apiKey)
             && !string.IsNullOrWhiteSpace(apiKey))
             return $"apikey:{apiKey}".ToLowerInvariant();
 
-        return context.Connection.RemoteIpAddress?.ToString() ?? "anonymous";
+        return ctx.Connection.RemoteIpAddress?.ToString() ?? "anonymous";
     }
 
-    // ── RFC 6585 / IETF Rate-Limit Headers draft ─────────────────────────────
+    // ── Service ID from Ocelot AddHeadersToRequest ───────────────────────────
 
-    private static void SetRateLimitHeaders(
-        HttpContext              context,
-        RateLimitResult?         result,
-        CustomerRateLimitConfig  config)
+    private static string? ResolveServiceId(HttpContext ctx)
+    {
+        if (ctx.Request.Headers.TryGetValue("X-Service-ID", out var svcId)
+            && !string.IsNullOrWhiteSpace(svcId))
+            return svcId.ToString().ToLowerInvariant();
+        return null;
+    }
+
+    // ── Response headers ─────────────────────────────────────────────────────
+
+    private static void SetHeaders(
+        HttpContext ctx, RateLimitResult? result, CustomerRateLimitConfig config)
     {
         var policy = config.PrimaryPolicy;
-        if (policy is null || result is null) return;
+        if (policy is null) return;
 
-        var headers = context.Response.Headers;
-        headers["X-RateLimit-Limit"]     = policy.Limit.ToString();
-        headers["X-RateLimit-Remaining"] = result.RemainingRequests.ToString();
-        headers["X-RateLimit-Algorithm"] = policy.Algorithm.ToString();
-        headers["X-RateLimit-Reset"]     = DateTimeOffset.UtcNow.Add(policy.Window)
-                                               .ToUnixTimeSeconds().ToString();
+        ctx.Response.Headers["X-RateLimit-Limit"] = policy.Limit.ToString();
+        ctx.Response.Headers["X-RateLimit-Algorithm"] = policy.Algorithm.ToString();
+        ctx.Response.Headers["X-RateLimit-Reset"] =
+            DateTimeOffset.UtcNow.Add(policy.Window).ToUnixTimeSeconds().ToString();
 
-        if (!result.IsAllowed && result.RetryAfter > TimeSpan.Zero)
-            headers["Retry-After"] = ((int)Math.Ceiling(result.RetryAfter.TotalSeconds)).ToString();
+        if (result is not null)
+            ctx.Response.Headers["X-RateLimit-Remaining"] = result.RemainingRequests.ToString();
+
+        if (result is { IsAllowed: false } && result.RetryAfter > TimeSpan.Zero)
+            ctx.Response.Headers["Retry-After"] =
+                ((int)Math.Ceiling(result.RetryAfter.TotalSeconds)).ToString();
     }
 
-    // ── 429 response body ─────────────────────────────────────────────────────
+    // ── 429 response ─────────────────────────────────────────────────────────
 
-    private static readonly JsonSerializerOptions _jsonOptions = new()
+    private static async Task WriteResponseAsync(
+        HttpContext ctx, RateLimitResult result, string customerId, string scope)
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = false
-    };
-
-    private static async Task WriteRateLimitResponse(
-        HttpContext      context,
-        RateLimitResult  result,
-        string           customerId)
-    {
-        context.Response.StatusCode  = (int)HttpStatusCode.TooManyRequests;
-        context.Response.ContentType = "application/json";
+        ctx.Response.StatusCode = (int)HttpStatusCode.TooManyRequests;
+        ctx.Response.ContentType = "application/json";
 
         var body = JsonSerializer.Serialize(new
         {
-            error            = "rate_limit_exceeded",
-            message          = "Too many requests. Check the Retry-After header and slow down.",
+            error = "rate_limit_exceeded",
+            message = $"Rate limit exceeded for scope '{scope}'. Check Retry-After header.",
             customerId,
+            scope,
             retryAfterSeconds = (int)Math.Ceiling(result.RetryAfter.TotalSeconds),
-            retryAfter        = result.RetryAfter > TimeSpan.Zero
+            retryAfter = result.RetryAfter > TimeSpan.Zero
                                     ? DateTimeOffset.UtcNow.Add(result.RetryAfter).ToString("O")
-                                    : null,
-            documentationUrl  = "https://your-api.com/docs/rate-limits"
-        }, _jsonOptions);
+                                    : null
+        }, _json);
 
-        await context.Response.WriteAsync(body);
+        await ctx.Response.WriteAsync(body);
     }
 }

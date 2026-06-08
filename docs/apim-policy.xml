@@ -53,7 +53,7 @@
         <!-- Per-hour guard -->
         <rate-limit-by-key
           calls="2000000"
-          renewal-period="3600"
+          renewal-period="300"
           counter-key="@(context.Subscription.Id + ":per-hour")" />
 
       </when>
@@ -70,7 +70,7 @@
 
         <rate-limit-by-key
           calls="200000"
-          renewal-period="3600"
+          renewal-period="300"
           counter-key="@(context.Subscription.Id + ":per-hour")" />
 
       </when>
@@ -87,7 +87,45 @@
 
     </choose>
 
-    <!-- Step 4 — Informational headers -->
+    <!-- ── Step 4: Per-SERVICE rate limits (on top of customer limits) ───── -->
+    <choose>
+
+      <!-- employee Service: 500/min per customer subscription -->
+      <when condition="@(context.Request.Url.Path.ToLower().StartsWith("/orders"))">
+      <rate-limit-by-key calls="500" renewal-period="60"
+        counter-key="@("employee:=""
+        remaining-calls-header-name="X-RateLimit-Remaining"
+        retry-after-header-name="Retry-After" />
+      <set-header name="X-Service-Name" exists-action="override">
+        <value>employee-service</value>
+      </set-header>
+      </when>
+
+      <!-- product Service: strict 50/min — protect downstream product processor -->
+      <when condition="@(context.Request.Url.Path.ToLower().StartsWith("/payments"))">
+      <rate-limit-by-key calls="50" renewal-period="60"
+        counter-key="@("product:=""
+        remaining-calls-header-name="X-RateLimit-Remaining"
+        retry-after-header-name="Retry-After" />
+      <set-header name="X-Service-Name" exists-action="override">
+        <value>product-service</value>
+      </set-header>
+      </when>
+
+      <!-- <!-- Shipping Service: 200/min --> -->
+      <!-- <when condition="@(context.Request.Url.Path.ToLower().StartsWith("/shipping"))"> -->
+      <!-- <rate-limit-by-key calls="200" renewal-period="60" -->
+        <!-- counter-key="@("shipping:="" -->
+        <!-- remaining-calls-header-name="X-RateLimit-Remaining" -->
+        <!-- retry-after-header-name="Retry-After" /> -->
+      <!-- <set-header name="X-Service-Name" exists-action="override"> -->
+        <!-- <value>shipping-service</value> -->
+      <!-- </set-header> -->
+      <!-- </when> -->
+
+    </choose>
+
+    <!-- Step 5 — Informational headers -->
     <set-header name="X-RateLimit-Policy" exists-action="override">
       <value>@((string)context.Variables["customerId"])</value>
     </set-header>
@@ -102,6 +140,9 @@
     <base />
     <set-header name="X-APIM-Processed" exists-action="override">
       <value>true</value>
+    </set-header>
+    <set-header name="X-Gateway" exists-action="override">
+    <value>APIM + .NET Ocelot</value>
     </set-header>
   </outbound>
 
